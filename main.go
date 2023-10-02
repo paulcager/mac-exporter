@@ -63,33 +63,40 @@ type SensorCode struct {
 	name string
 	key  string
 	cKey unsafe.Pointer
+	desc *prometheus.Desc
 }
 
 var sensorCodes []SensorCode
 
 func init() {
-	add := func(key, name string) {
+	add := func(key string, name string, description string) {
 		sensorCodes = append(sensorCodes,
 			SensorCode{
 				name: name,
 				key:  key,
 				cKey: unsafe.Pointer(C.CString(key)),
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, subsystem, name),
+					description,
+					nil,
+					prometheus.Labels{"code": key},
+				),
 			},
 		)
 	}
 
 	// See https://logi.wiki/index.php/SMC_Sensor_Codes for a list of codes.
-	add("TC0P", "cpu_temp")
-	add("TG0P", "gpu_temp")
-	add("TM0P", "memory_temp")
-	add("Ts0P", "palm_temp_left")
-	add("Ts1P", "palm_temp_right")
-	add("F0Ac", "fan_speed_left")
-	add("F1Ac", "fan_speed_right")
-	add("ID0R", "dc_in")
-	add("PPBR", "battery_current")
-	add("TaLC", "airflow_left")
-	add("TaRC", "airflow_right")
+	add("TC0P", "cpu_temp", "CPU temperature")
+	add("TG0P", "gpu_temp", "GPU temperature")
+	add("TM0P", "memory_temp", "RAM temperature")
+	add("Ts0P", "palm_temp_left", "Left palm-pad temperature")
+	add("Ts1P", "palm_temp_right", "Right palm-pad temperature")
+	add("F0Ac", "fan_speed_left", "Left fan speed (units unknown)")
+	add("F1Ac", "fan_speed_right", "Right fan speed (units unknown)")
+	add("ID0R", "dc_in", "dc in ??")
+	add("PPBR", "battery_current", "Batter current (A)")
+	add("TaLC", "airflow_left", "Left airflow (units unknown)")
+	add("TaRC", "airflow_right", "Right airflow (units unknown)")
 	//add("", "")
 }
 
@@ -109,14 +116,14 @@ func main() {
 
 	exporter := NewExporter(logger)
 	prometheus.MustRegister(exporter)
-	prometheus.MustRegister(version.NewCollector("haproxy_exporter"))
+	prometheus.MustRegister(version.NewCollector("mac_exporter"))
 
 	http.Handle(*metricsEndpoint, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
              <head><title>Mac Exporter</title></head>
              <body>
-             <h1>Haproxy Exporter</h1>
+             <h1>Mac Exporter</h1>
              <p><a href='` + *metricsEndpoint + `'>Metrics</a></p>
              </body>
              </html>`))
@@ -140,46 +147,39 @@ func main() {
 type Exporter struct {
 	mutex sync.RWMutex
 
-	up                          prometheus.Gauge
-	totalScrapes, totalFailures prometheus.Counter
-	logger                      log.Logger
+	totalScrapes prometheus.Counter
+	logger       log.Logger
 }
 
 func NewExporter(logger log.Logger) *Exporter {
 	return &Exporter{
-		up: prometheus.NewGauge(prometheus.GaugeOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "up",
-			Help:      "Was the last scrape successful.",
-		}),
 		totalScrapes: prometheus.NewCounter(prometheus.CounterOpts{
 			Namespace: namespace,
 			Subsystem: subsystem,
 			Name:      "exporter_scrapes_total",
 			Help:      "Current total scrapes.",
 		}),
-		totalFailures: prometheus.NewCounter(prometheus.CounterOpts{
-			Namespace: namespace,
-			Subsystem: subsystem,
-			Name:      "exporter_failed_scrapes_total",
-			Help:      "Current total failed scrapes.",
-		}),
 		logger: logger,
 	}
 }
 
 func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
-	ch <- e.totalFailures.Desc()
 	ch <- e.totalScrapes.Desc()
-	ch <- e.up.Desc()
+
+	for _, sensor := range sensorCodes {
+		ch <- sensor.desc
+	}
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	e.mutex.Lock() // To protect metrics from concurrent collects.
 	defer e.mutex.Unlock()
 
-	ch <- e.totalFailures
+	e.totalScrapes.Inc()
 	ch <- e.totalScrapes
-	ch <- e.up
+
+	for _, sensor := range sensorCodes {
+		value := float64(C.SMCGetFloat((*C.char)(sensor.cKey)))
+		ch <- prometheus.MustNewConstMetric(sensor.desc, prometheus.GaugeValue, value)
+	}
 }
