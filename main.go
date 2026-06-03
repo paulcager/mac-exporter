@@ -4,8 +4,13 @@ package main
 //
 // #include "smc.h"
 // #include <math.h>
+// #include <CoreFoundation/CoreFoundation.h>
+// #include <CoreFoundation/CFDateFormatter.h>
+// #include <IOKit/pwr_mgt/IOPM.h>
+// #include <IOKit/pwr_mgt/IOPMLib.h>
 //
 // io_connect_t conn;
+//
 //
 //double SMCGetFloat(char* key)
 //{
@@ -21,12 +26,48 @@ package main
 //    return NAN;
 //}
 //
+// // TODO. This is bodgy (although I know we only get 3 elements in real life).
+// #define MAX_ELEMENTS 32
+// CFStringRef             keys[MAX_ELEMENTS];
+// CFNumberRef             values[MAX_ELEMENTS];
 //
+// int power_status(void) {
+//	CFDictionaryRef         cpuStatus;
+//	IOReturn ret = IOPMCopyCPUPowerStatus(&cpuStatus);
+//	int count;
+// 	if (ret != kIOReturnSuccess) {
+//		fprintf(stderr, "IOPMCopyCPUPowerStatus: %ld\n", (long)ret);
+//		return 0;
+//	}
+//
+//	count = CFDictionaryGetCount(cpuStatus);
+//  if (count > MAX_ELEMENTS) {
+//		fprintf(stderr, "IOPMCopyCPUPowerStatus returned %ld elements\n", (long)count);
+//		return 0;
+//	}
+//
+//  CFDictionaryGetKeysAndValues(cpuStatus,(const void **)keys, (const void **)values);
+//
+//	return count;
+// }
+//
+// #define MAX_KEY_LEN 125
+// char key_buff[MAX_KEY_LEN+1];
+//
+// char *get_power_key(int i) {
+//	CFStringGetCString(keys[i], key_buff, MAX_KEY_LEN, kCFStringEncodingUTF8);
+//	return key_buff;
+// }
+//
+// int get_power_value(int i) {
+//	int val;
+//	CFNumberGetValue(values[i], kCFNumberIntType, &val);
+//	return val;
+// }
 import "C"
 
 import (
 	"fmt"
-	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
 	"net/http"
 	"os"
 	"sync"
@@ -35,13 +76,13 @@ import (
 
 	log "github.com/go-kit/log"
 	"github.com/go-kit/log/level"
-	"github.com/kr/pretty"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
 	"github.com/prometheus/common/promlog"
 	"github.com/prometheus/common/promlog/flag"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
+	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
 	kingpin "gopkg.in/alecthomas/kingpin.v2"
 )
 
@@ -55,8 +96,6 @@ var (
 	webConfig       = webflag.AddFlags(kingpin.CommandLine, ":9784")
 
 	logger log.Logger
-
-	_ = pretty.Print
 )
 
 type SensorCode struct {
@@ -67,6 +106,13 @@ type SensorCode struct {
 }
 
 var sensorCodes []SensorCode
+
+var powerStatusDesc = prometheus.NewDesc(
+	prometheus.BuildFQName(namespace, subsystem, "status"),
+	"MAC Power status",
+	[]string{"name"},
+	nil,
+)
 
 func init() {
 	add := func(key string, name string, description string) {
@@ -118,6 +164,8 @@ func main() {
 	prometheus.MustRegister(exporter)
 	prometheus.MustRegister(version.NewCollector("mac_exporter"))
 
+	go printSensors()
+
 	http.Handle(*metricsEndpoint, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
@@ -133,15 +181,32 @@ func main() {
 		level.Error(logger).Log("msg", "Error starting HTTP server", "err", err)
 		os.Exit(1)
 	}
+}
 
+func printSensors() {
 	for {
+		time.Sleep(30 * time.Second)
+
 		fmt.Println()
 
 		for _, sensor := range sensorCodes {
 			fmt.Println(sensor.name, C.SMCGetFloat((*C.char)(sensor.cKey)))
 		}
-		time.Sleep(10 * time.Second)
+		for k, v := range powerStatus() {
+			fmt.Println(k, v)
+		}
 	}
+}
+
+func powerStatus() map[string]int {
+	count := (int)(C.power_status())
+	m := make(map[string]int)
+
+	for i := 0; i < count; i++ {
+		m[C.GoString(C.get_power_key(C.int(i)))] = (int)(C.get_power_value(C.int(i)))
+	}
+
+	return m
 }
 
 type Exporter struct {
@@ -169,6 +234,8 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 	for _, sensor := range sensorCodes {
 		ch <- sensor.desc
 	}
+
+	ch <- powerStatusDesc
 }
 
 func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
@@ -181,5 +248,9 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 	for _, sensor := range sensorCodes {
 		value := float64(C.SMCGetFloat((*C.char)(sensor.cKey)))
 		ch <- prometheus.MustNewConstMetric(sensor.desc, prometheus.GaugeValue, value)
+	}
+
+	for k, v := range powerStatus() {
+		ch <- prometheus.MustNewConstMetric(powerStatusDesc, prometheus.GaugeValue, float64(v), k)
 	}
 }
