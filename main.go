@@ -67,11 +67,9 @@ package main
 import "C"
 
 import (
-	"fmt"
 	"net/http"
 	"os"
 	"sync"
-	"time"
 	"unsafe"
 
 	log "github.com/go-kit/log"
@@ -164,8 +162,6 @@ func main() {
 	prometheus.MustRegister(exporter)
 	prometheus.MustRegister(version.NewCollector("mac_exporter"))
 
-	go printSensors()
-
 	http.Handle(*metricsEndpoint, promhttp.Handler())
 	http.HandleFunc("/", func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte(`<html>
@@ -180,21 +176,6 @@ func main() {
 	if err := web.ListenAndServe(srv, webConfig, logger); err != nil {
 		level.Error(logger).Log("msg", "Error starting HTTP server", "err", err)
 		os.Exit(1)
-	}
-}
-
-func printSensors() {
-	for {
-		time.Sleep(30 * time.Second)
-
-		fmt.Println()
-
-		for _, sensor := range sensorCodes {
-			fmt.Println(sensor.name, C.SMCGetFloat((*C.char)(sensor.cKey)))
-		}
-		for k, v := range powerStatus() {
-			fmt.Println(k, v)
-		}
 	}
 }
 

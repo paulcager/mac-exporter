@@ -25,8 +25,6 @@ Three layers, all in a handful of files:
 - `main.go` cgo preamble (the comment block above `import "C"`) — glue C code: `SMCGetFloat(key)` wrapping `SMCReadKey2`, and `power_status()`/`get_power_key()`/`get_power_value()` wrapping `IOPMCopyCPUPowerStatus`. Note this C lives in Go comments — edits there must keep valid cgo comment syntax.
 - `main.go` Go code — a custom `prometheus.Collector` (`Exporter`) that reads each sensor on every scrape. Sensors are registered in `init()` via the `add(key, name, description)` helper; to add a metric, add one `add(...)` line (SMC key reference: https://logi.wiki/index.php/SMC_Sensor_Codes). Power-status entries become a single `mac_power_status` gauge with a `name` label.
 
-`printSensors()` also dumps all sensor values to stdout every 30s — debug output, independent of the HTTP scrape path.
-
 ## Notes
 
 - A single global SMC connection (`C.conn`) is opened in `main()` and shared; `Collect` is serialized with a mutex.
