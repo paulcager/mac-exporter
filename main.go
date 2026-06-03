@@ -64,9 +64,36 @@ package main
 //	CFNumberGetValue(values[i], kCFNumberIntType, &val);
 //	return val;
 // }
+//
+// io_service_t battery;
+//
+// int battery_open(void) {
+//	battery = IOServiceGetMatchingService(kIOMasterPortDefault, IOServiceMatching("AppleSmartBattery"));
+//	return battery != 0;
+// }
+//
+// // Returns the named AppleSmartBattery property as a double (booleans as 0/1),
+// // or NAN if the property is missing or not a number/boolean.
+// double battery_prop(char *name) {
+//	CFStringRef key = CFStringCreateWithCString(NULL, name, kCFStringEncodingUTF8);
+//	CFTypeRef val = IORegistryEntryCreateCFProperty(battery, key, kCFAllocatorDefault, 0);
+//	double out = NAN;
+//	CFRelease(key);
+//	if (val == NULL) {
+//		return NAN;
+//	}
+//	if (CFGetTypeID(val) == CFNumberGetTypeID()) {
+//		CFNumberGetValue(val, kCFNumberDoubleType, &out);
+//	} else if (CFGetTypeID(val) == CFBooleanGetTypeID()) {
+//		out = CFBooleanGetValue(val) ? 1 : 0;
+//	}
+//	CFRelease(val);
+//	return out;
+// }
 import "C"
 
 import (
+	"math"
 	"net/http"
 	"os"
 	"sync"
@@ -105,6 +132,16 @@ type SensorCode struct {
 
 var sensorCodes []SensorCode
 
+type BatteryProp struct {
+	prop  string
+	cProp unsafe.Pointer
+	scale float64
+	desc  *prometheus.Desc
+}
+
+var batteryProps []BatteryProp
+var batteryOK bool
+
 var powerStatusDesc = prometheus.NewDesc(
 	prometheus.BuildFQName(namespace, subsystem, "status"),
 	"MAC Power status",
@@ -141,12 +178,55 @@ func init() {
 	add("PPBR", "battery_current", "Batter current (A)")
 	add("TaLC", "airflow_left", "Left airflow (units unknown)")
 	add("TaRC", "airflow_right", "Right airflow (units unknown)")
+	add("TB0T", "battery_temp_0", "Battery sensor 0 temperature")
+	add("TB1T", "battery_temp_1", "Battery sensor 1 temperature")
+	add("TB2T", "battery_temp_2", "Battery sensor 2 temperature")
+	add("Th0H", "heatsink_temp_0", "Heatsink 0 temperature")
+	add("Th1H", "heatsink_temp_1", "Heatsink 1 temperature")
+	add("TA0P", "ambient_temp", "Ambient temperature")
+	add("TW0P", "wifi_temp", "WiFi module temperature")
+	add("TI0P", "thunderbolt_temp", "Thunderbolt temperature")
+	add("PSTR", "system_power", "Total system power (W)")
+	add("PC0C", "cpu_core_power", "CPU core power (W)")
+	add("PCPC", "cpu_package_power", "CPU package power (W)")
+	add("PDTR", "dc_in_power", "DC-in power (W)")
+	add("VD0R", "dc_in_voltage", "DC-in voltage (V)")
 	//add("", "")
+
+	addBattery := func(prop string, name string, scale float64, description string) {
+		batteryProps = append(batteryProps,
+			BatteryProp{
+				prop:  prop,
+				cProp: unsafe.Pointer(C.CString(prop)),
+				scale: scale,
+				desc: prometheus.NewDesc(
+					prometheus.BuildFQName(namespace, "battery", name),
+					description,
+					nil,
+					nil,
+				),
+			},
+		)
+	}
+
+	// AppleSmartBattery properties (see `ioreg -rn AppleSmartBattery`).
+	addBattery("CurrentCapacity", "current_capacity_mah", 1, "Current battery charge (mAh)")
+	addBattery("MaxCapacity", "max_capacity_mah", 1, "Current full-charge capacity (mAh)")
+	addBattery("DesignCapacity", "design_capacity_mah", 1, "Design full-charge capacity (mAh)")
+	addBattery("CycleCount", "cycle_count", 1, "Battery charge cycles")
+	addBattery("Temperature", "temp_celsius", 0.01, "Battery temperature (C)")
+	addBattery("Voltage", "voltage_volts", 0.001, "Battery voltage (V)")
+	addBattery("Amperage", "amperage_amps", 0.001, "Battery current; negative when discharging (A)")
+	addBattery("IsCharging", "charging", 1, "1 if the battery is charging")
+	addBattery("ExternalConnected", "external_power", 1, "1 if external power is connected")
+	addBattery("FullyCharged", "fully_charged", 1, "1 if the battery is fully charged")
 }
 
 func main() {
 	C.SMCOpen(&C.conn)
 	defer C.SMCClose(C.conn)
+
+	batteryOK = C.battery_open() != 0
 
 	promlogConfig := &promlog.Config{}
 	flag.AddFlags(kingpin.CommandLine, promlogConfig)
@@ -216,6 +296,10 @@ func (e *Exporter) Describe(ch chan<- *prometheus.Desc) {
 		ch <- sensor.desc
 	}
 
+	for _, prop := range batteryProps {
+		ch <- prop.desc
+	}
+
 	ch <- powerStatusDesc
 }
 
@@ -228,7 +312,18 @@ func (e *Exporter) Collect(ch chan<- prometheus.Metric) {
 
 	for _, sensor := range sensorCodes {
 		value := float64(C.SMCGetFloat((*C.char)(sensor.cKey)))
-		ch <- prometheus.MustNewConstMetric(sensor.desc, prometheus.GaugeValue, value)
+		if !math.IsNaN(value) {
+			ch <- prometheus.MustNewConstMetric(sensor.desc, prometheus.GaugeValue, value)
+		}
+	}
+
+	if batteryOK {
+		for _, prop := range batteryProps {
+			value := float64(C.battery_prop((*C.char)(prop.cProp)))
+			if !math.IsNaN(value) {
+				ch <- prometheus.MustNewConstMetric(prop.desc, prometheus.GaugeValue, value*prop.scale)
+			}
+		}
 	}
 
 	for k, v := range powerStatus() {

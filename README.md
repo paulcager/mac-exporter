@@ -1,9 +1,12 @@
 # mac-exporter
 
 A Prometheus exporter for macOS hardware sensors (temperatures, fan speeds,
-battery current, CPU power/throttling status), read from the SMC and IOKit.
+power draw, CPU throttling status, battery charge/health), read from the SMC
+and IOKit.
 
-Listens on `:9784`, metrics at `/metrics`, namespace `mac_power_*`.
+Listens on `:9784`, metrics at `/metrics`, namespaces `mac_power_*` and
+`mac_battery_*`. OS-level metrics (CPU, memory, disk, network) are out of
+scope — use node_exporter for those.
 
 ## Build
 
